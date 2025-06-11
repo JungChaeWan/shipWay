@@ -1,124 +1,159 @@
 <?php
-// ship_position.php
-// Fetch wind and current direction data for Jeju sea and compute contact side of a boat.
+$obsCodeList = [
+    "08JJ13" => "애월항북측",
+    "23LTC02" => "제주도서측",
+    "02JJ-1"  => "제주항",
+    "08JJ07"  => "서귀포"
+];
+$defaultObs = "08JJ13";
+$selectedObs = $_GET['currentObsCode'] ?? $defaultObs;
 
-$lat = 33.4996; // Jeju latitude
-$lon = 126.5312; // Jeju longitude
+// 일자 기본값 (오늘, Ymd형식)
+$today = date('Y-m-d');
+$selectedDate = $_GET['targetDate'] ?? $today;
 
-function callApi(string $url, array $headers = []): ?array {
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    if ($headers) {
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-    }
-    $result = curl_exec($ch);
-    curl_close($ch);
-    if ($result === false) {
-        return null;
-    }
-    return json_decode($result, true);
+// 주간/야간 선택값 (기본 주간)
+$dayType = $_GET['dayType'] ?? 'day';
+
+$api_url = "http://" . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . "/forecast.php?currentObsCode=" . urlencode($selectedObs) . "&targetDate=" . urlencode($selectedDate) . "&dayType=" . urlencode($dayType);
+
+$ch = curl_init();
+curl_setopt($ch, CURLOPT_URL, $api_url);
+curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+$response = curl_exec($ch);
+if ($response === false) {
+    echo "<div class='alert alert-danger mt-4'>[ERROR] API 호출 실패! (curl error: " . curl_error($ch) . ")</div>";
+    exit;
 }
+curl_close($ch);
 
-function mapAngleToArea(float $angle): string {
-    $areas = [
-        '선수',       // 0 deg
-        '우측 선수',  // 45 deg
-        '우현',       // 90 deg
-        '우측 선미', // 135 deg
-        '선미',       // 180 deg
-        '좌측 선미', // 225 deg
-        '좌현',       // 270 deg
-        '좌측 선수'   // 315 deg
-    ];
-    $index = (int)round($angle / 45) % 8;
-    return $areas[$index];
+$data = json_decode($response, true);
+if ($data === null) {
+    echo "<div class='alert alert-danger mt-4'>[ERROR] JSON 파싱 실패! (json_last_error: " . json_last_error_msg() . ")</div>";
+    exit;
 }
-
-// Fetch hourly wind direction
-$windUrl = sprintf(
-    'https://api.open-meteo.com/v1/forecast?latitude=%s&longitude=%s&hourly=winddirection_10m&timezone=Asia%%2FSeoul',
-    $lat,
-    $lon
-);
-$windData = callApi($windUrl);
-
-// Fetch hourly current direction using KHOA fcTidalCurrent API
-$obsCode = '08JJ13'; // forecast station near Jeju
-$serviceKey = 'lGFE/I4jx/FoaJr1C7S6kg==';
-$date = date('Ymd');
-$currentUrl = sprintf(
-    'http://www.khoa.go.kr/api/oceangrid/fcTidalCurrent/search.do?ServiceKey=%s&ObsCode=%s&Date=%s&ResultType=json',
-    $serviceKey,
-    $obsCode,
-    $date
-);
-$currentData = callApi($currentUrl);
-
-if (!$windData || !$currentData) {
-    echo 'API 데이터를 가져오지 못했습니다.';
+if (!isset($data['forecast']) || !is_array($data['forecast'])) {
+    echo "<div class='alert alert-danger mt-4'>[ERROR] forecast 데이터가 없습니다.</div>";
+    echo "<pre>" . print_r($data, true) . "</pre>";
     exit;
 }
 
-$windHours = $windData['hourly']['time'];
-$windDir = $windData['hourly']['winddirection_10m'];
-$currentList = [];
-if (isset($currentData['result']['data'])) {
-    $currentList = $currentData['result']['data'];
-} elseif (isset($currentData['data'])) {
-    $currentList = $currentData['data'];
-} elseif (isset($currentData['list'])) {
-    $currentList = $currentData['list'];
-}
-
-$rows = [];
-foreach ($windHours as $idx => $time) {
-    if (!isset($windDir[$idx]) || !isset($currentList[$idx])) {
-        continue;
+// --- ★ direction 값 집계 및 최적 포지션 산출 ---
+$dirCount = [];
+foreach ($data['forecast'] as $row) {
+    $d = $row['direction'];
+    if ($d && $d !== "데이터 없음") {
+        if (!isset($dirCount[$d])) $dirCount[$d] = 0;
+        $dirCount[$d]++;
     }
-    $wind = $windDir[$idx];
-    $bowDir = fmod($wind + 180, 360);
-    $currEntry = $currentList[$idx];
-    $currentDir = $currEntry['current_direction'] ?? $currEntry['direction'] ?? null;
-    if ($currentDir === null) {
-        continue;
-    }
-    $inflow = fmod($currentDir + 180, 360);
-    $angle = fmod($inflow - $bowDir + 360, 360);
-    $area = mapAngleToArea($angle);
-    $rows[] = [
-        'time' => $time,
-        'wind' => $wind,
-        'current' => $currentDir,
-        'area' => $area
-    ];
 }
-
-?><!DOCTYPE html>
+if (count($dirCount) > 0) {
+    arsort($dirCount);
+    $bestDir = key($dirCount);
+    $bestCnt = current($dirCount);
+    $totalCnt = array_sum($dirCount);
+    $percent = round($bestCnt / $totalCnt * 100);
+    $bestSummary = "<div class='alert alert-danger fw-bold mb-3'>하루 최적 유리 포지션: <span style='font-size:1.2em;'>$bestDir</span> <span class='ms-2'>(빈도: $bestCnt/$totalCnt, $percent%)</span></div>";
+} else {
+    $bestSummary = "<div class='alert alert-danger fw-bold mb-3'>하루 최적 유리 포지션: 데이터 부족</div>";
+}
+?>
+<!doctype html>
 <html lang="ko">
 <head>
     <meta charset="UTF-8">
-    <title>선박 위치 안내</title>
-    <style>
-        table { border-collapse: collapse; }
-        th, td { border: 1px solid #ccc; padding: 4px 8px; }
-    </style>
+    <title>선상낚시 조류/풍향 예측</title>
+    <!-- Bootstrap 5 CSS -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <!-- Bootstrap-datepicker CSS -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-datepicker/1.10.0/css/bootstrap-datepicker.min.css" rel="stylesheet">
 </head>
-<body>
-<h1>제주도 인근 해역 선박 접촉 면</h1>
-<table>
-    <thead>
-    <tr><th>시간</th><th>풍향 (deg)</th><th>조류 방향 (deg)</th><th>접촉 면</th></tr>
-    </thead>
-    <tbody>
-    <?php foreach ($rows as $row): ?>
-        <tr>
-            <td><?= htmlspecialchars($row['time']) ?></td>
-            <td style="text-align:right;"><?= htmlspecialchars($row['wind']) ?></td>
-            <td style="text-align:right;"><?= htmlspecialchars($row['current']) ?></td>
-            <td><?= htmlspecialchars($row['area']) ?></td>
-        </tr>
-    <?php endforeach; ?>
-    </tbody>
-</table>
+<body class="bg-light">
+<div class="container py-4">
+    <h2 class="mb-4">선집입 위치 예측</h2>
+
+    <!-- 관측소/날짜/주야간 선택 폼 -->
+    <form method="get" class="row g-3 mb-4 align-items-center" id="filterForm">
+        <div class="col-auto">
+            <label for="currentObsCode" class="col-form-label fw-bold">관측소 선택:</label>
+        </div>
+        <div class="col-auto">
+            <select name="currentObsCode" id="currentObsCode" class="form-select" onchange="this.form.submit()">
+                <?php foreach ($obsCodeList as $code => $name): ?>
+                    <option value="<?=htmlspecialchars($code)?>" <?=$code == $selectedObs ? "selected" : ""?>>
+                        <?=htmlspecialchars($name)?>
+                    </option>
+                <?php endforeach; ?>
+            </select>
+        </div>
+        <div class="col-auto">
+            <label for="targetDate" class="col-form-label fw-bold">일자 선택:</label>
+        </div>
+        <div class="col-auto">
+            <input type="text" name="targetDate" id="targetDate" class="form-control" value="<?=htmlspecialchars($selectedDate)?>" autocomplete="off" readonly style="background:#fff; cursor:pointer; max-width:140px;">
+        </div>
+        <div class="col-auto">
+            <div class="btn-group" role="group" aria-label="주야간선택">
+                <input type="radio" class="btn-check" name="dayType" id="dayTypeDay" value="day" autocomplete="off" <?=$dayType=="day"?"checked":""?>>
+                <label class="btn btn-outline-primary" for="dayTypeDay" onclick="$('#filterForm').submit()">주간</label>
+                <input type="radio" class="btn-check" name="dayType" id="dayTypeNight" value="night" autocomplete="off" <?=$dayType=="night"?"checked":""?>>
+                <label class="btn btn-outline-dark" for="dayTypeNight" onclick="$('#filterForm').submit()">야간</label>
+            </div>
+        </div>
+    </form>
+
+    <!-- ★ 최적 포지션 알림 -->
+    <?=$bestSummary?>
+
+    <div class="table-responsive">
+        <table class="table table-bordered table-striped align-middle text-center">
+            <thead class="table-primary">
+            <tr>
+                <th>시간</th>
+                <th>풍향</th>
+                <th>조류</th>
+                <th>선수방향</th>
+                <th>유리포지션</th>
+            </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($data['forecast'] as $row): ?>
+                <tr>
+                    <td><?=htmlspecialchars($row['time'])?></td>
+                    <td><?=htmlspecialchars($row['wind_dir'])?></td>
+                    <td><?=htmlspecialchars($row['current_dir'])?></td>
+                    <td><?=htmlspecialchars($row['ship_entry_dir'])?></td>
+                    <td><?=htmlspecialchars($row['direction'])?></td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<!-- Bootstrap JS, Popper, jQuery, Datepicker -->
+<script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-datepicker/1.10.0/js/bootstrap-datepicker.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap-datepicker/1.10.0/locales/bootstrap-datepicker.ko.min.js"></script>
+<script>
+    $(function(){
+        $('#targetDate').datepicker({
+            format: "yyyy-mm-dd",
+            language: "ko",
+            autoclose: true,
+            todayHighlight: true,
+            endDate: '+10d'
+        }).on('changeDate', function(e){
+            $('#filterForm').submit();
+        });
+
+        // radio 클릭 시 즉시 submit
+        $('input[name=dayType]').on('change', function(){
+            $('#filterForm').submit();
+        });
+    });
+</script>
 </body>
 </html>
