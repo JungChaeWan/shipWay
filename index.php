@@ -42,14 +42,17 @@ $windUrl = sprintf(
 );
 $windData = callApi($windUrl);
 
-// Fetch hourly current direction (requires API key)
-$currApiKey = getenv('STORMGLASS_API_KEY');
+// Fetch hourly current direction using KHOA fcTidalCurrent API
+$obsCode = '08JJ13'; // forecast station near Jeju
+$serviceKey = 'lGFE/I4jx/FoaJr1C7S6kg==';
+$date = date('Ymd');
 $currentUrl = sprintf(
-    'https://api.stormglass.io/v2/ocean/currents/point?lat=%s&lng=%s&params=direction',
-    $lat,
-    $lon
+    'http://www.khoa.go.kr/api/oceangrid/fcTidalCurrent/search.do?ServiceKey=%s&ObsCode=%s&Date=%s&ResultType=json',
+    $serviceKey,
+    $obsCode,
+    $date
 );
-$currentData = callApi($currentUrl, ['Authorization: ' . $currApiKey]);
+$currentData = callApi($currentUrl);
 
 if (!$windData || !$currentData) {
     echo 'API 데이터를 가져오지 못했습니다.';
@@ -58,16 +61,27 @@ if (!$windData || !$currentData) {
 
 $windHours = $windData['hourly']['time'];
 $windDir = $windData['hourly']['winddirection_10m'];
-$currentDirHours = $currentData['hours'];
+$currentList = [];
+if (isset($currentData['result']['data'])) {
+    $currentList = $currentData['result']['data'];
+} elseif (isset($currentData['data'])) {
+    $currentList = $currentData['data'];
+} elseif (isset($currentData['list'])) {
+    $currentList = $currentData['list'];
+}
 
 $rows = [];
 foreach ($windHours as $idx => $time) {
-    if (!isset($windDir[$idx]) || !isset($currentDirHours[$idx]['direction'])) {
+    if (!isset($windDir[$idx]) || !isset($currentList[$idx])) {
         continue;
     }
     $wind = $windDir[$idx];
     $bowDir = fmod($wind + 180, 360);
-    $currentDir = $currentDirHours[$idx]['direction'];
+    $currEntry = $currentList[$idx];
+    $currentDir = $currEntry['current_direction'] ?? $currEntry['direction'] ?? null;
+    if ($currentDir === null) {
+        continue;
+    }
     $inflow = fmod($currentDir + 180, 360);
     $angle = fmod($inflow - $bowDir + 360, 360);
     $area = mapAngleToArea($angle);
